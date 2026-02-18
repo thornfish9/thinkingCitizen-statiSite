@@ -1,0 +1,47 @@
+# .gitattributes for ThinkingCitizen repo
+
+# Normalize line endings and prevent CRLF/LF warnings
+
+# Normalize all text files automatically
+
+* text=auto
+
+# Force LF for source and infra files
+
+*.cs text eol=lf
+*.csproj text eol=lf
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+*.psd1 text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.tf text eol=lf
+*.ts text eol=lf
+*.js text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+
+# Hugo content should stay LF
+
+site/content/** text eol=lf
+site/layouts/** text eol=lf
+
+# Windows scripts can remain CRLF if desired
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary files (never normalize)
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary

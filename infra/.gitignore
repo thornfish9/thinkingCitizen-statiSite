@@ -1,0 +1,159 @@
+.gitignore for ThinkingCitizen repo
+
+Covers: AWS CDK (C#), Hugo site, PowerShell, general Windows dev
+
+############################
+
+GLOBAL
+
+############################
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.orig
+
+############################
+
+GIT
+
+############################
+.gitmodules
+
+############################
+
+WINDOWS
+
+############################
+*.lnk
+Desktop.ini
+
+############################
+
+AWS CDK (repo root + infra)
+
+############################
+cdk.out/
+**/cdk.out/
+cdk.context.json
+
+CDK temp files
+
+*.assets.json
+*.template.json
+*.lock
+
+############################
+
+.NET / C# (infra/src)
+
+############################
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+
+VS / Rider
+
+.vs/
+.idea/
+
+############################
+
+NODE (for CDK CLI + tooling)
+
+############################
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+############################
+
+POWERSHELL BUILD ARTIFACTS
+
+############################
+*.ps1xml
+*.psm1~
+*.psd1~
+
+############################
+
+HUGO (site folder)
+
+############################
+
+Generated site output
+
+site/public/
+public/
+
+Hugo cache
+
+resources/_gen/
+.hugo_build.lock
+
+############################
+
+ENV / SECRETS (IMPORTANT)
+
+############################
+.env
+.env.*
+*.secret
+*.key
+*.pem
+*.pfx
+
+############################
+
+AWS LOCAL CONFIG (optional — keep out unless intentional)
+
+.aws/
+
+############################
+
+MISC PROJECT-SPECIFIC
+
+############################
+
+Local scratch artifacts
+
+files.txt
+
+Shortcuts accidentally added
+
+infra - Shortcut.lnk
+
+############################
+
+KEEP THESE (DO NOT IGNORE)
+
+############################
+
+- infra/src/**/*.cs
+
+- infra/src/**/*.csproj
+
+- infra/*.ps1
+
+- site/content
+
+- site/layouts
+
+- site/assets
+
+- hugo.toml / config files
+
+- README.md
+
+- cdk.json (source of truth)
+

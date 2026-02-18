@@ -1,0 +1,4 @@
+**/bin/
+**/obj/
+**/cdk.out/
+.DS_Store
