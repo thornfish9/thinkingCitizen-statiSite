@@ -27,7 +27,6 @@ function Log([string]$msg) {
 
 function RunExe(
   [string]$file,
-  [Parameter(ValueFromRemainingArguments=$true)]
   [string[]]$args,
   [int]$timeoutSeconds = -1
 ) {
@@ -50,35 +49,34 @@ function RunExe(
 
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $pinfo
-  $p.EnableRaisingEvents = $true
-
-  $stdoutBuf = New-Object System.Text.StringBuilder
-  $stderrBuf = New-Object System.Text.StringBuilder
-
-  # Stream stdout/stderr live while also capturing them
-  $p.add_OutputDataReceived({
-    param($sender, $e)
-    if ($null -ne $e.Data) {
-      [void]$stdoutBuf.AppendLine($e.Data)
-      Write-Host $e.Data
-    }
-  })
-  $p.add_ErrorDataReceived({
-    param($sender, $e)
-    if ($null -ne $e.Data) {
-      [void]$stderrBuf.AppendLine($e.Data)
-      Write-Host $e.Data
-    }
-  })
 
   try {
     [void]$p.Start()
   } catch {
-    throw "RunExe failed to start process: $file $argLine`n$($_.Exception.Message)"
+    throw "RunExe failed to start: $file $argLine`n$($_.Exception.Message)"
   }
 
-  $p.BeginOutputReadLine()
-  $p.BeginErrorReadLine()
+  # Read stdout/stderr concurrently without PowerShell event handlers (runspace-safe)
+  $stdoutLines = New-Object System.Collections.Generic.List[string]
+  $stderrLines = New-Object System.Collections.Generic.List[string]
+
+  $stdoutTask = [System.Threading.Tasks.Task]::Run([Action]{
+    try {
+      while (-not $p.StandardOutput.EndOfStream) {
+        $line = $p.StandardOutput.ReadLine()
+        if ($null -ne $line) { $stdoutLines.Add($line) | Out-Null }
+      }
+    } catch {}
+  })
+
+  $stderrTask = [System.Threading.Tasks.Task]::Run([Action]{
+    try {
+      while (-not $p.StandardError.EndOfStream) {
+        $line = $p.StandardError.ReadLine()
+        if ($null -ne $line) { $stderrLines.Add($line) | Out-Null }
+      }
+    } catch {}
+  })
 
   $exited =
     if ($timeoutSeconds -gt 0) {
@@ -89,7 +87,6 @@ function RunExe(
     }
 
   if (-not $exited) {
-    # Timeout: attempt graceful close then kill
     Log "RunExe: timeout reached; terminating PID $($p.Id)..."
     try {
       try { [void]$p.CloseMainWindow() } catch {}
@@ -97,36 +94,36 @@ function RunExe(
       if (-not $p.HasExited) { $p.Kill() }
     } catch {}
 
-    $stderr = $stderrBuf.ToString().TrimEnd()
-    $stdout = $stdoutBuf.ToString().TrimEnd()
+    try { $p.WaitForExit() } catch {}
 
-    $detail = @()
-    if ($stderr) { $detail += "STDERR:`n$stderr" }
-    if ($stdout) { $detail += "STDOUT:`n$stdout" }
-    $detailText = ($detail -join "`n`n")
+    # Let readers drain whatever they can
+    try { [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask,$stderrTask), 2000) } catch {}
 
-    throw "Command timed out after ${timeoutSeconds}s: $file $argLine`n`n$detailText"
+    $stderr = ($stderrLines -join "`n").TrimEnd()
+    $stdout = ($stdoutLines -join "`n").TrimEnd()
+
+    if ($stdout) { Write-Host $stdout }
+    if ($stderr) { Write-Host $stderr }
+
+    throw "Command timed out after ${timeoutSeconds}s: $file $argLine"
   }
 
-  # Ensure async readers flush; sometimes needed even after WaitForExit(timeout)
-  try { $p.WaitForExit() } catch {}
+  # Ensure readers complete
+  try { [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask,$stderrTask), 5000) } catch {}
 
   $exit = $p.ExitCode
-  $stderr = $stderrBuf.ToString().TrimEnd()
-  $stdout = $stdoutBuf.ToString().TrimEnd()
+  $stderr = ($stderrLines -join "`n").TrimEnd()
+  $stdout = ($stdoutLines -join "`n").TrimEnd()
+
+  if ($stdout) { Write-Host $stdout }
+  if ($stderr) { Write-Host $stderr }
 
   if ($exit -ne 0) {
-    $detail = @()
-    if ($stderr) { $detail += "STDERR:`n$stderr" }
-    if ($stdout) { $detail += "STDOUT:`n$stdout" }
-    $detailText = ($detail -join "`n`n")
-
-    throw "Command failed ($exit): $file $argLine`n`n$detailText"
+    throw "Command failed ($exit): $file $argLine"
   }
 
   return $stdout
 }
-
 
 function AwsJson(
   [Parameter(ValueFromRemainingArguments=$true)]
