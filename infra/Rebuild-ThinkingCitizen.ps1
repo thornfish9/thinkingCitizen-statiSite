@@ -163,6 +163,7 @@ function AwsJson(
   $finalArgs += $parts
   $finalArgs += @("--profile",$Profile,"--output","json")
 
+  Log ("Calling RunExe 1")
   $stdout = RunExe $AwsExe $finalArgs $timeoutSeconds
 
   if (-not $stdout) { return $null }
@@ -191,9 +192,10 @@ function DestroyStackStrict([string]$stackName, [string]$region) {
     return
   }
 
-
+  Log ("Calling RunExe 2")
   RunExe $CdkExe @("destroy", $stackName, "--profile", $Profile, "--force")  -timeoutSeconds 3600
   
+  Log ("Calling RunExe 3")
   RunExe $AwsExe @("cloudformation","wait","stack-delete-complete",
                  "--region",$region,
                  "--stack-name",$stackName,
@@ -210,6 +212,7 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
   }
 
   try {
+    Log ("Calling RunExe 4")
     RunExe $CdkExe @("destroy", $stackName, "--profile", $Profile, "--force")  -timeoutSeconds 3600
   } catch {
 
@@ -226,6 +229,7 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
       DeleteNonRequiredRecordSets $zoneId $domain
 
       Log "Retrying DNS stack deletion via CloudFormation delete-stack..."
+      Log ("Calling RunExe 5")
       RunExe $AwsExe @(
         "cloudformation","delete-stack",
         "--region",$region,
@@ -233,6 +237,7 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
         "--profile",$Profile
       )  -timeoutSeconds 3600
 
+      Log ("Calling RunExe 6")
       RunExe $AwsExe @(
         "cloudformation","wait","stack-delete-complete",
         "--region",$region,
@@ -247,6 +252,7 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
     throw
   }
 
+  Log ("Calling RunExe 7")
   RunExe $AwsExe @(
     "cloudformation","wait","stack-delete-complete",
     "--region",$region,
@@ -300,6 +306,7 @@ function UpdateRegistrarNameservers([string]$domain, [string[]]$nsServers) {
   ($payload | ConvertTo-Json -Depth 5) | Out-File -Encoding utf8 $tmp
 
   try {
+    Log ("Calling RunExe 8")
     RunExe $AwsExe @(
       "route53domains","update-domain-nameservers",
       "--region",$DomainsRegion,
@@ -481,6 +488,7 @@ function DeleteNonRequiredRecordSets([string]$zoneId, [string]$domain) {
   ($payload | ConvertTo-Json -Depth 20) | Out-File -Encoding utf8 $tmp
 
   try {
+    Log ("Calling RunExe 9")
     RunExe $AwsExe @(
       "route53","change-resource-record-sets",
       "--hosted-zone-id",$zoneId,
@@ -531,11 +539,16 @@ RequireCommand $DotnetExe
 
 # Preflight identity
 Log "Getting caller identity..."
+Log ("Calling RunExe 10")
 RunExe $AwsExe @("sts", "get-caller-identity", "--profile", $Profile)  -timeoutSeconds 3600
 
 # Optional rebuild
 Log "Building solution..."
-RunExe $DotnetExe @( "build", $SolutionPath) -timeoutSeconds $DoNotTimeout
+Log ("Calling RunExe 11")
+$typeval = $DoNotTimeout.GetType().FullName
+Log ("type of DonotTimeout is $typeval")
+Log ("value of DonotTimout is $DoNotTimeout")
+RunExe $DotnetExe @( "build", $SolutionPath) -timeoutSeconds -1
 
 # Phase 1: destroy stacks (reverse order)
 Log "Destroying stacks (reverse dependency order)..."
@@ -550,6 +563,7 @@ DeleteIfExists (Join-Path $PSScriptRoot "cdk.out")
 
 # Phase 3: deploy DNS
 Log "Deploying DNS stack..."
+Log ("Calling RunExe 12")
 RunExe $CdkExe @("deploy", $DnsStack, "--profile", $Profile, "--require-approval", "never")  -timeoutSeconds 3600
 
 # Phase 4: read hosted zone + NS
@@ -568,12 +582,14 @@ WaitForDelegation $DomainName $ns $DnsWaitSeconds
 
 # Phase 7: deploy cert + wait issued
 Log "Deploying Cert stack..."
+Log ("Calling RunExe 13")
 RunExe $CdkExe @("deploy", $CertStack, "--profile", $Profile, "--require-approval", "never")  -timeoutSeconds 3600
 
 WaitForCertIssued $DomainName $AcmWaitSeconds
 
 # Phase 8: deploy site
 Log "Deploying Site stack..."
+Log ("Calling RunExe 14")
 RunExe $CdkExe @("deploy", $SiteStack, "--profile", $Profile, "--require-approval", "never")  -timeoutSeconds 3600
 
 # Phase 9: basic verify
