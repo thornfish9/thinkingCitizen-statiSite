@@ -27,12 +27,34 @@ function Log([string]$msg) {
 
 function RunExe(
   [string]$file,
-  [string[]]$args,
-  [int]$timeoutSeconds = -1
-) {
-  if (-not $args) { $args = @() }
 
-  $argLine = ($args -join " ")
+  # Keep timeout named; default -1 = wait forever
+  [int]$timeoutSeconds = -1,
+
+  # Accept remaining args in either expanded or array-literal form
+  [Parameter(ValueFromRemainingArguments=$true)]
+  [object[]]$args
+) {
+  # Normalize args: flatten nested arrays and coerce to non-empty strings
+  $flat = @()
+  if ($args) {
+    foreach ($a in $args) {
+      if ($null -eq $a) { continue }
+      if ($a -is [System.Array] -and -not ($a -is [string])) {
+        foreach ($x in $a) { if ($null -ne $x) { $flat += $x } }
+      } else {
+        $flat += $a
+      }
+    }
+  }
+
+  $flat = @($flat | ForEach-Object { $_.ToString() } | Where-Object { $_ -and $_.Trim().Length -gt 0 })
+
+  if ($flat.Count -eq 0) {
+    throw "RunExe called with no args: $file. Caller must pass args, e.g. RunExe `$AwsExe 'sts' 'get-caller-identity' -timeoutSeconds 3600"
+  }
+
+  $argLine = ($flat -join " ")
   if ($timeoutSeconds -gt 0) {
     Log "RunExe: $file $argLine (timeout ${timeoutSeconds}s)"
   } else {
@@ -50,13 +72,9 @@ function RunExe(
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $pinfo
 
-  try {
-    [void]$p.Start()
-  } catch {
-    throw "RunExe failed to start: $file $argLine`n$($_.Exception.Message)"
-  }
+  try { [void]$p.Start() }
+  catch { throw "RunExe failed to start: $file $argLine`n$($_.Exception.Message)" }
 
-  # Read stdout/stderr concurrently without PowerShell event handlers (runspace-safe)
   $stdoutLines = New-Object System.Collections.Generic.List[string]
   $stderrLines = New-Object System.Collections.Generic.List[string]
 
@@ -79,12 +97,8 @@ function RunExe(
   })
 
   $exited =
-    if ($timeoutSeconds -gt 0) {
-      $p.WaitForExit($timeoutSeconds * 1000)
-    } else {
-      $p.WaitForExit()
-      $true
-    }
+    if ($timeoutSeconds -gt 0) { $p.WaitForExit($timeoutSeconds * 1000) }
+    else { $p.WaitForExit(); $true }
 
   if (-not $exited) {
     Log "RunExe: timeout reached; terminating PID $($p.Id)..."
@@ -93,27 +107,22 @@ function RunExe(
       Start-Sleep -Milliseconds 500
       if (-not $p.HasExited) { $p.Kill() }
     } catch {}
-
     try { $p.WaitForExit() } catch {}
-
-    # Let readers drain whatever they can
     try { [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask,$stderrTask), 2000) } catch {}
 
-    $stderr = ($stderrLines -join "`n").TrimEnd()
     $stdout = ($stdoutLines -join "`n").TrimEnd()
-
+    $stderr = ($stderrLines -join "`n").TrimEnd()
     if ($stdout) { Write-Host $stdout }
     if ($stderr) { Write-Host $stderr }
 
     throw "Command timed out after ${timeoutSeconds}s: $file $argLine"
   }
 
-  # Ensure readers complete
   try { [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask,$stderrTask), 5000) } catch {}
 
   $exit = $p.ExitCode
-  $stderr = ($stderrLines -join "`n").TrimEnd()
   $stdout = ($stdoutLines -join "`n").TrimEnd()
+  $stderr = ($stderrLines -join "`n").TrimEnd()
 
   if ($stdout) { Write-Host $stdout }
   if ($stderr) { Write-Host $stderr }
