@@ -31,11 +31,13 @@ function RunExe(
   [string[]]$args,
   [int]$timeoutSeconds = -1
 ) {
+  if (-not $args) { $args = @() }
+
   $argLine = ($args -join " ")
   if ($timeoutSeconds -gt 0) {
-    Log "Starting RunExe for file: $file and argline: $argLine (timeout ${timeoutSeconds}s)"
+    Log "RunExe: $file $argLine (timeout ${timeoutSeconds}s)"
   } else {
-    Log "Starting RunExe for file: $file and argline: $argLine"
+    Log "RunExe: $file $argLine"
   }
 
   $pinfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -53,6 +55,7 @@ function RunExe(
   $stdoutBuf = New-Object System.Text.StringBuilder
   $stderrBuf = New-Object System.Text.StringBuilder
 
+  # Stream stdout/stderr live while also capturing them
   $p.add_OutputDataReceived({
     param($sender, $e)
     if ($null -ne $e.Data) {
@@ -68,7 +71,12 @@ function RunExe(
     }
   })
 
-  [void]$p.Start()
+  try {
+    [void]$p.Start()
+  } catch {
+    throw "RunExe failed to start process: $file $argLine`n$($_.Exception.Message)"
+  }
+
   $p.BeginOutputReadLine()
   $p.BeginErrorReadLine()
 
@@ -81,19 +89,16 @@ function RunExe(
     }
 
   if (-not $exited) {
-    # Timeout
+    # Timeout: attempt graceful close then kill
+    Log "RunExe: timeout reached; terminating PID $($p.Id)..."
     try {
-      Log "RunExe timeout reached; attempting to terminate process (PID $($p.Id))..."
-      # Try a graceful close first
       try { [void]$p.CloseMainWindow() } catch {}
       Start-Sleep -Milliseconds 500
       if (-not $p.HasExited) { $p.Kill() }
-    } catch {
-      # Ignore secondary failures, but we still throw below
-    }
+    } catch {}
 
-    $stderr = $stderrBuf.ToString()
-    $stdout = $stdoutBuf.ToString()
+    $stderr = $stderrBuf.ToString().TrimEnd()
+    $stdout = $stdoutBuf.ToString().TrimEnd()
 
     $detail = @()
     if ($stderr) { $detail += "STDERR:`n$stderr" }
@@ -103,26 +108,33 @@ function RunExe(
     throw "Command timed out after ${timeoutSeconds}s: $file $argLine`n`n$detailText"
   }
 
-  # Ensure async readers flush
+  # Ensure async readers flush; sometimes needed even after WaitForExit(timeout)
   try { $p.WaitForExit() } catch {}
 
-  if ($p.ExitCode -ne 0) {
-    $stderr = $stderrBuf.ToString()
-    $stdout = $stdoutBuf.ToString()
+  $exit = $p.ExitCode
+  $stderr = $stderrBuf.ToString().TrimEnd()
+  $stdout = $stdoutBuf.ToString().TrimEnd()
 
+  if ($exit -ne 0) {
     $detail = @()
     if ($stderr) { $detail += "STDERR:`n$stderr" }
     if ($stdout) { $detail += "STDOUT:`n$stdout" }
     $detailText = ($detail -join "`n`n")
 
-    throw "Command failed ($($p.ExitCode)): $file $argLine`n`n$detailText"
+    throw "Command failed ($exit): $file $argLine`n`n$detailText"
   }
+
+  return $stdout
 }
 
-function AwsJson([Parameter(ValueFromRemainingArguments=$true)] [string[]]$awsArgs) {
 
-  # Back-compat: if called as a single string like "route53 list-hosted-zones",
-  # split on whitespace into tokens.
+function AwsJson(
+  [Parameter(ValueFromRemainingArguments=$true)]
+  [string[]]$awsArgs,
+  [int]$timeoutSeconds = 3600
+) {
+
+  # Back-compat token handling
   $parts =
     if (-not $awsArgs -or $awsArgs.Count -eq 0) {
       @()
@@ -140,10 +152,26 @@ function AwsJson([Parameter(ValueFromRemainingArguments=$true)] [string[]]$awsAr
 
   Log ("aws {0} --profile {1} --output json" -f ($parts -join " "), $Profile)
 
-  $out = & $AwsExe @parts --profile $Profile --output json
-  if ($LASTEXITCODE -ne 0) { throw "aws failed ($LASTEXITCODE): aws $($parts -join ' ')" }
+  # Build final argument list safely
+  $finalArgs = @()
+  $finalArgs += $parts
+  $finalArgs += @("--profile",$Profile,"--output","json")
 
-  return ($out | ConvertFrom-Json)
+  $stdout = RunExe $AwsExe $finalArgs $timeoutSeconds
+
+  if (-not $stdout) { return $null }
+
+  try {
+    return ($stdout | ConvertFrom-Json)
+  }
+  catch {
+    throw @"
+AwsJson failed to parse JSON.
+Command: aws $($parts -join ' ')
+Raw output:
+$stdout
+"@
+  }
 }
 
 function StackExists([string]$stackName, [string]$region) {
@@ -158,12 +186,12 @@ function DestroyStackStrict([string]$stackName, [string]$region) {
   }
 
 
-  RunExe $CdkExe @("destroy", $stackName, "--profile", $Profile, "--force")
+  RunExe $CdkExe @("destroy", $stackName, "--profile", $Profile, "--force")  -timeoutSeconds 3600
   
   RunExe $AwsExe @("cloudformation","wait","stack-delete-complete",
                  "--region",$region,
                  "--stack-name",$stackName,
-                 "--profile",$Profile)
+                 "--profile",$Profile)  -timeoutSeconds 3600
   Log "Deleted: $stackName ($region)"
 }
 
@@ -176,7 +204,7 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
   }
 
   try {
-    RunExe $CdkExe @("destroy", $stackName, "--profile", $Profile, "--force")
+    RunExe $CdkExe @("destroy", $stackName, "--profile", $Profile, "--force")  -timeoutSeconds 3600
   } catch {
 
     # Match against the full error record text (RunExe now includes stdout/stderr in the thrown exception).
@@ -197,14 +225,14 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
         "--region",$region,
         "--stack-name",$stackName,
         "--profile",$Profile
-      )
+      )  -timeoutSeconds 3600
 
       RunExe $AwsExe @(
         "cloudformation","wait","stack-delete-complete",
         "--region",$region,
         "--stack-name",$stackName,
         "--profile",$Profile
-      )
+      )  -timeoutSeconds 3600
 
       Log "Deleted: $stackName ($region)"
       return
@@ -218,7 +246,7 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
     "--region",$region,
     "--stack-name",$stackName,
     "--profile",$Profile
-  )
+  )  -timeoutSeconds 3600
   Log "Deleted: $stackName ($region)"
 }
 
@@ -272,7 +300,7 @@ function UpdateRegistrarNameservers([string]$domain, [string[]]$nsServers) {
       "--domain-name",$domain,
       "--cli-input-json","file://$tmp",
       "--profile",$Profile
-    )
+    )  -timeoutSeconds 3600
   } finally {
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
   }
@@ -452,7 +480,7 @@ function DeleteNonRequiredRecordSets([string]$zoneId, [string]$domain) {
       "--hosted-zone-id",$zoneId,
       "--change-batch","file://$tmp",
       "--profile",$Profile
-    )
+    )  -timeoutSeconds 3600
   } finally {
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
   }
@@ -488,6 +516,8 @@ $CertStackRegion = "us-east-1"
 $SiteStackRegion = "us-west-2"
 $SolutionPath   = ".\src\Infra.sln"
 
+$DoNotTimeout = -1
+
 # Preflight Require Commands
 RequireCommand $CdkExe
 RequireCommand $AwsExe
@@ -495,11 +525,11 @@ RequireCommand $DotnetExe
 
 # Preflight identity
 Log "Getting caller identity..."
-RunExe $AwsExe @("sts", "get-caller-identity", "--profile", $Profile)
+RunExe $AwsExe @("sts", "get-caller-identity", "--profile", $Profile)  -timeoutSeconds 3600
 
 # Optional rebuild
 Log "Building solution..."
-RunExe $DotnetExe @( "build", $SolutionPath)
+RunExe $DotnetExe @( "build", $SolutionPath) -timeoutSeconds $DoNotTimeout
 
 # Phase 1: destroy stacks (reverse order)
 Log "Destroying stacks (reverse dependency order)..."
@@ -514,7 +544,7 @@ DeleteIfExists (Join-Path $PSScriptRoot "cdk.out")
 
 # Phase 3: deploy DNS
 Log "Deploying DNS stack..."
-RunExe $CdkExe @("deploy", $DnsStack, "--profile", $Profile, "--require-approval", "never")
+RunExe $CdkExe @("deploy", $DnsStack, "--profile", $Profile, "--require-approval", "never")  -timeoutSeconds 3600
 
 # Phase 4: read hosted zone + NS
 $zoneId = GetHostedZoneId $DomainName
@@ -532,13 +562,13 @@ WaitForDelegation $DomainName $ns $DnsWaitSeconds
 
 # Phase 7: deploy cert + wait issued
 Log "Deploying Cert stack..."
-RunExe $CdkExe @("deploy", $CertStack, "--profile", $Profile, "--require-approval", "never")
+RunExe $CdkExe @("deploy", $CertStack, "--profile", $Profile, "--require-approval", "never")  -timeoutSeconds 3600
 
 WaitForCertIssued $DomainName $AcmWaitSeconds
 
 # Phase 8: deploy site
 Log "Deploying Site stack..."
-RunExe $CdkExe @("deploy", $SiteStack, "--profile", $Profile, "--require-approval", "never")
+RunExe $CdkExe @("deploy", $SiteStack, "--profile", $Profile, "--require-approval", "never")  -timeoutSeconds 3600
 
 # Phase 9: basic verify
 Log "Basic verify: public NS"
