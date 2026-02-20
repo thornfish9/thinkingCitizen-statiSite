@@ -1,0 +1,3 @@
+winget install --exact --id JohnMacFarlane.Pandoc --version 3.9
+
+We're pinning this version so that we don't introduce big version diffs in case a newer version introduces changes

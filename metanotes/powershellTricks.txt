@@ -1,0 +1,10 @@
+Ttitlebar of a Powershell window
+	$Host.UI.RawUI.WindowTitle = "Pandoc Shell"
+
+PS Version
+	$PSVersionTable
+
+Events - View and kill zombie file hooks
+	Get-EventSubscriber | Format-Table SubscriptionId, SourceIdentifier, EventName, HandlerDelegate -Auto
+	Get-EventSubscriber | Unregister-Event
+	
