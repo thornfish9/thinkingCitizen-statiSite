@@ -1,0 +1,42 @@
+############################################
+# Hugo build artifacts
+############################################
+
+# Hugo lock
+.hugo_build.lock
+
+# Generated site output
+/public/
+
+# Hugo resource pipeline output
+/resources/_gen/
+
+# Hugo cache (if enabled)
+.hugo_cache/
+
+############################################
+# Pandoc / writing pipeline
+############################################
+
+# Temporary pandoc output (if you ever emit intermediates)
+*.tmp.md
+*.intermediate.md
+*.pandoc.md
+
+# Word temporary files
+~$*.docx
+
+############################################
+# Watcher / automation noise
+############################################
+
+# PowerShell temp files
+*.log
+*.tmp
+
+############################################
+# Editor / OS junk (site-scoped)
+############################################
+
+.DS_Store
+Thumbs.db
