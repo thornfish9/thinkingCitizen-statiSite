@@ -1,0 +1,185 @@
+---
+
+HUGO + WORD + PANDOC DEVELOPMENT LOOP (ThinkingCitizen)
+
+Purpose
+This document describes the local development loop for writing content in Word and seeing it live instantly in Hugo.
+
+Overview
+Word → folder watcher → Pandoc → Markdown + front matter → Hugo rebuild → browser refresh
+
+Site structure assumptions
+
+* Hugo site root: thinkingCitizen/site
+* Word drop folder: site/writing/guides
+* Generated Markdown: site/content/guides
+* Local URL base: http://localhost:1313
+
+One-time setup (already done)
+
+* Hugo installed
+* Pandoc installed and on PATH
+* Folder watcher PowerShell script working
+* Minimal Hugo layouts exist:
+
+  * layouts/index.html
+  * layouts/_default/single.html
+  * layouts/_default/baseof.html
+
+## DAILY DEVELOPMENT LOOP
+
+1. Start Hugo local server
+   From the site root:
+
+   cd site
+   hugo server -D --disableFastRender
+
+Notes:
+
+* -D includes drafts
+* --disableFastRender avoids caching issues during automation
+
+Expected output includes:
+Web Server is available at http://localhost:1313/
+
+Leave this running.
+
+2. Start the Word → Markdown watcher
+   In another terminal:
+
+   cd site/tools   (or wherever the script lives)
+   ./watch.ps1
+
+This script:
+
+* Watches the Word drop folder
+* Runs Pandoc when files change
+* Inserts Hugo front matter
+* Writes Markdown into content/
+
+Leave this running.
+
+3. Edit in Word
+   Create or edit documents in:
+
+   site/writing/guides
+
+Save normally (Ctrl+S).
+
+Each save should trigger:
+
+* Watcher detects change
+* Pandoc conversion
+* Markdown written to content/
+* Hugo rebuild message in server console
+* Browser auto-refresh (Hugo live reload)
+
+Important:
+During development, the browser will automatically refresh every time you save in Word. You usually do NOT need to manually reload the page.
+
+4. View the page in browser
+   Open:
+
+   http://localhost:1313/
+
+The homepage lists all pages.
+
+Direct page URL pattern:
+
+```
+http://localhost:1313/guides/<filename>/
+```
+
+Example:
+amazonboycott.md →
+http://localhost:1313/guides/amazonboycott/
+
+Notes:
+
+* URLs are based on filename, not title
+* Lowercase filenames are recommended
+* Slugs can be customized later via front matter
+
+5. Draft visibility
+   If front matter contains:
+
+   draft: true
+
+Then:
+
+* Visible with hugo server -D
+* Hidden in production builds
+
+## GIT HYGIENE DURING WRITING
+
+Once significant progress has been made on a document, commit your changes.
+
+Typical loop:
+
+* Write in Word
+* Verify in browser
+* Repeat until a stable milestone
+* Commit to Git
+
+Example:
+
+```
+git add .
+git commit -m "Add/update guide: <topic>"
+git push
+```
+
+This keeps the writing pipeline versioned and prevents losing work.
+
+## COMMON COMMANDS
+
+Restart Hugo cleanly:
+Ctrl+C
+hugo server -D --disableFastRender
+
+List drafts Hugo sees:
+hugo list drafts
+
+Force full rebuild:
+delete public/ (optional)
+restart server
+
+## COMMON FAILURE MODES
+
+"Not found" in browser
+Usually means:
+
+* Hugo started in wrong folder
+* Missing layouts
+* File not under content/
+* Drafts hidden because -D missing
+
+Page not updating
+Check:
+
+* Watcher console for Pandoc errors
+* Hugo console for rebuild messages
+
+Weird URLs
+Check:
+
+* File path under content/
+* Filename casing
+* Front matter slug overrides
+
+## MENTAL MODEL
+
+Think of it as a pipeline:
+
+Word save
+→ watcher fires
+→ Pandoc generates Markdown
+→ front matter added
+→ file lands in content/
+→ Hugo detects change
+→ page live instantly in browser
+
+Once this loop works, content creation becomes:
+Open Word → Save → Watch browser update.
+
+---
