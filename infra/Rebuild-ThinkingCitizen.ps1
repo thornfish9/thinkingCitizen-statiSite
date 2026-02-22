@@ -25,44 +25,46 @@ function Log([string]$msg) {
   Write-Host ("[{0}] {1}" -f (NowUtc), $msg)
 }
 
-function RunExe(
-  [string]$file,
+function RunExe {
+  param(
+    [Parameter(Mandatory=$true)]
+    [string]$FilePath,
 
-  # Keep timeout named; default -1 = wait forever
-  [int]$timeoutSeconds = -1,
+    # Mandatory, but you can still pass -1 explicitly to mean "no timeout"
+    [Parameter(Mandatory=$true)]
+    [int]$TimeoutSeconds,
 
-  # Accept remaining args in either expanded or array-literal form
-  [Parameter(ValueFromRemainingArguments=$true)]
-  [object[]]$args
-) {
-  # Normalize args: flatten nested arrays and coerce to non-empty strings
-  $flat = @()
-  if ($args) {
-    foreach ($a in $args) {
-      if ($null -eq $a) { continue }
-      if ($a -is [System.Array] -and -not ($a -is [string])) {
-        foreach ($x in $a) { if ($null -ne $x) { $flat += $x } }
-      } else {
-        $flat += $a
-      }
+    [Parameter(Mandatory=$true)]
+    [string[]]$ArgumentList
+  )
+
+  if (-not $ArgumentList -or $ArgumentList.Count -eq 0) {
+    throw "RunExe called with empty -ArgumentList for: $FilePath"
+  }
+
+  # Minimal quoting to avoid obvious breakage when args contain spaces.
+  # (Still 'boring': no clever binding, just safe string construction.)
+  function QuoteArg([string]$s) {
+    if ($null -eq $s) { return "" }
+    $t = $s.ToString()
+    if ($t -match '[\s"]') {
+      # Escape embedded quotes for CreateProcess-style parsing
+      $t = $t -replace '"','\"'
+      return '"' + $t + '"'
     }
+    return $t
   }
 
-  $flat = @($flat | ForEach-Object { $_.ToString() } | Where-Object { $_ -and $_.Trim().Length -gt 0 })
+  $argLine = (($ArgumentList | ForEach-Object { QuoteArg $_ }) -join " ")
 
-  if ($flat.Count -eq 0) {
-    throw "RunExe called with no args: $file. Caller must pass args, e.g. RunExe `$AwsExe 'sts' 'get-caller-identity' -timeoutSeconds 3600"
-  }
-
-  $argLine = ($flat -join " ")
-  if ($timeoutSeconds -gt 0) {
-    Log "RunExe: $file $argLine (timeout ${timeoutSeconds}s)"
+  if ($TimeoutSeconds -gt 0) {
+    Log "RunExe: $FilePath $argLine (timeout ${TimeoutSeconds}s)"
   } else {
-    Log "RunExe: $file $argLine"
+    Log "RunExe: $FilePath $argLine"
   }
 
   $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-  $pinfo.FileName = $file
+  $pinfo.FileName = $FilePath
   $pinfo.Arguments = $argLine
   $pinfo.RedirectStandardOutput = $true
   $pinfo.RedirectStandardError  = $true
@@ -73,7 +75,7 @@ function RunExe(
   $p.StartInfo = $pinfo
 
   try { [void]$p.Start() }
-  catch { throw "RunExe failed to start: $file $argLine`n$($_.Exception.Message)" }
+  catch { throw "RunExe failed to start: $FilePath $argLine`n$($_.Exception.Message)" }
 
   $stdoutLines = New-Object System.Collections.Generic.List[string]
   $stderrLines = New-Object System.Collections.Generic.List[string]
@@ -97,7 +99,7 @@ function RunExe(
   })
 
   $exited =
-    if ($timeoutSeconds -gt 0) { $p.WaitForExit($timeoutSeconds * 1000) }
+    if ($TimeoutSeconds -gt 0) { $p.WaitForExit($TimeoutSeconds * 1000) }
     else { $p.WaitForExit(); $true }
 
   if (-not $exited) {
@@ -115,7 +117,7 @@ function RunExe(
     if ($stdout) { Write-Host $stdout }
     if ($stderr) { Write-Host $stderr }
 
-    throw "Command timed out after ${timeoutSeconds}s: $file $argLine"
+    throw "Command timed out after ${TimeoutSeconds}s: $FilePath $argLine"
   }
 
   try { [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask,$stderrTask), 5000) } catch {}
@@ -128,7 +130,7 @@ function RunExe(
   if ($stderr) { Write-Host $stderr }
 
   if ($exit -ne 0) {
-    throw "Command failed ($exit): $file $argLine"
+    throw "Command failed ($exit): $FilePath $argLine"
   }
 
   return $stdout
@@ -164,7 +166,7 @@ function AwsJson(
   $finalArgs += @("--profile",$Profile,"--output","json")
 
   Log ("Calling RunExe 1")
-  $stdout = RunExe $AwsExe $finalArgs $timeoutSeconds
+  $stdout = RunExe -FilePath $AwsExe -TimeoutSeconds $timeoutSeconds -ArgumentList $finalArgs
 
   if (-not $stdout) { return $null }
 
@@ -193,13 +195,13 @@ function DestroyStackStrict([string]$stackName, [string]$region) {
   }
 
   Log ("Calling RunExe 2")
-  RunExe $CdkExe @("destroy", $stackName, "--profile", $Profile, "--force")  -timeoutSeconds 3600
+  RunExe -FilePath $CdkExe -TimeoutSeconds 3600 -ArgumentList @("destroy", $stackName, "--profile", $Profile, "--force")
   
   Log ("Calling RunExe 3")
-  RunExe $AwsExe @("cloudformation","wait","stack-delete-complete",
+  RunExe -FilePath $AwsExe -TimeoutSeconds 3600 -ArgumentList @("cloudformation","wait","stack-delete-complete",
                  "--region",$region,
                  "--stack-name",$stackName,
-                 "--profile",$Profile)  -timeoutSeconds 3600
+                 "--profile",$Profile)
   Log "Deleted: $stackName ($region)"
 }
 
@@ -213,7 +215,7 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
 
   try {
     Log ("Calling RunExe 4")
-    RunExe $CdkExe @("destroy", $stackName, "--profile", $Profile, "--force")  -timeoutSeconds 3600
+    RunExe -FilePath $CdkExe -TimeoutSeconds 3600 -ArgumentList @("destroy", $stackName, "--profile", $Profile, "--force")
   } catch {
 
     # Match against the full error record text (RunExe now includes stdout/stderr in the thrown exception).
@@ -230,20 +232,20 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
 
       Log "Retrying DNS stack deletion via CloudFormation delete-stack..."
       Log ("Calling RunExe 5")
-      RunExe $AwsExe @(
+      RunExe -FilePath $AwsExe -timeoutSeconds 3600 -ArgumentList @(
         "cloudformation","delete-stack",
         "--region",$region,
         "--stack-name",$stackName,
         "--profile",$Profile
-      )  -timeoutSeconds 3600
+      )
 
       Log ("Calling RunExe 6")
-      RunExe $AwsExe @(
+      RunExe -FilePath $AwsExe -timeoutSeconds 3600 -ArgumentList @(
         "cloudformation","wait","stack-delete-complete",
         "--region",$region,
         "--stack-name",$stackName,
         "--profile",$Profile
-      )  -timeoutSeconds 3600
+      )
 
       Log "Deleted: $stackName ($region)"
       return
@@ -253,12 +255,12 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
   }
 
   Log ("Calling RunExe 7")
-  RunExe $AwsExe @(
+  RunExe -FilePath $AwsExe -timeoutSeconds 3600 -ArgumentList @(
     "cloudformation","wait","stack-delete-complete",
     "--region",$region,
     "--stack-name",$stackName,
     "--profile",$Profile
-  )  -timeoutSeconds 3600
+  )
   Log "Deleted: $stackName ($region)"
 }
 
@@ -307,13 +309,13 @@ function UpdateRegistrarNameservers([string]$domain, [string[]]$nsServers) {
 
   try {
     Log ("Calling RunExe 8")
-    RunExe $AwsExe @(
+    RunExe -FileList $AwsExe -timeoutSeconds 3600 -ArgumentList @(
       "route53domains","update-domain-nameservers",
       "--region",$DomainsRegion,
       "--domain-name",$domain,
       "--cli-input-json","file://$tmp",
       "--profile",$Profile
-    )  -timeoutSeconds 3600
+    )
   } finally {
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
   }
@@ -489,12 +491,12 @@ function DeleteNonRequiredRecordSets([string]$zoneId, [string]$domain) {
 
   try {
     Log ("Calling RunExe 9")
-    RunExe $AwsExe @(
+    RunExe -FileList $AwsExe -timeoutSeconds 3600 -ArgumentList @(
       "route53","change-resource-record-sets",
       "--hosted-zone-id",$zoneId,
       "--change-batch","file://$tmp",
       "--profile",$Profile
-    )  -timeoutSeconds 3600
+    )
   } finally {
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
   }
@@ -540,7 +542,7 @@ RequireCommand $DotnetExe
 # Preflight identity
 Log "Getting caller identity..."
 Log ("Calling RunExe 10")
-RunExe $AwsExe @("sts", "get-caller-identity", "--profile", $Profile)  -timeoutSeconds 3600
+RunExe -FilePath $AwsExe -TimeoutSeconds 3600 -ArgumentList @("sts", "get-caller-identity", "--profile", $Profile)
 
 # Optional rebuild
 Log "Building solution..."
@@ -548,7 +550,7 @@ Log ("Calling RunExe 11")
 $typeval = $DoNotTimeout.GetType().FullName
 Log ("type of DonotTimeout is $typeval")
 Log ("value of DonotTimout is $DoNotTimeout")
-RunExe $DotnetExe @( "build", $SolutionPath) -timeoutSeconds -1
+RunExe -FilePath $DotnetExe -TimeoutSeconds -1 -ArgumentList @("build", $SolutionPath)
 
 # Phase 1: destroy stacks (reverse order)
 Log "Destroying stacks (reverse dependency order)..."
@@ -564,7 +566,7 @@ DeleteIfExists (Join-Path $PSScriptRoot "cdk.out")
 # Phase 3: deploy DNS
 Log "Deploying DNS stack..."
 Log ("Calling RunExe 12")
-RunExe $CdkExe @("deploy", $DnsStack, "--profile", $Profile, "--require-approval", "never")  -timeoutSeconds 3600
+RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $DnsStack, "--profile", $Profile, "--require-approval", "never")
 
 # Phase 4: read hosted zone + NS
 $zoneId = GetHostedZoneId $DomainName
@@ -583,14 +585,14 @@ WaitForDelegation $DomainName $ns $DnsWaitSeconds
 # Phase 7: deploy cert + wait issued
 Log "Deploying Cert stack..."
 Log ("Calling RunExe 13")
-RunExe $CdkExe @("deploy", $CertStack, "--profile", $Profile, "--require-approval", "never")  -timeoutSeconds 3600
+RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $CertStack, "--profile", $Profile, "--require-approval", "never")
 
 WaitForCertIssued $DomainName $AcmWaitSeconds
 
 # Phase 8: deploy site
 Log "Deploying Site stack..."
 Log ("Calling RunExe 14")
-RunExe $CdkExe @("deploy", $SiteStack, "--profile", $Profile, "--require-approval", "never")  -timeoutSeconds 3600
+RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $SiteStack, "--profile", $Profile, "--require-approval", "never")
 
 # Phase 9: basic verify
 Log "Basic verify: public NS"
