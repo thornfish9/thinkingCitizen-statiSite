@@ -70,6 +70,7 @@ function RunExe {
   $pinfo.RedirectStandardError  = $true
   $pinfo.UseShellExecute = $false
   $pinfo.CreateNoWindow = $true
+  $pinfo.WorkingDirectory = (Get-Location).Path
 
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $pinfo
