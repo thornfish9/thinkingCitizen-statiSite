@@ -78,26 +78,9 @@ function RunExe {
   try { [void]$p.Start() }
   catch { throw "RunExe failed to start: $FilePath $argLine`n$($_.Exception.Message)" }
 
-  $stdoutLines = New-Object System.Collections.Generic.List[string]
-  $stderrLines = New-Object System.Collections.Generic.List[string]
-
-  $stdoutTask = [System.Threading.Tasks.Task]::Run([Action]{
-    try {
-      while (-not $p.StandardOutput.EndOfStream) {
-        $line = $p.StandardOutput.ReadLine()
-        if ($null -ne $line) { $stdoutLines.Add($line) | Out-Null }
-      }
-    } catch {}
-  })
-
-  $stderrTask = [System.Threading.Tasks.Task]::Run([Action]{
-    try {
-      while (-not $p.StandardError.EndOfStream) {
-        $line = $p.StandardError.ReadLine()
-        if ($null -ne $line) { $stderrLines.Add($line) | Out-Null }
-      }
-    } catch {}
-  })
+  # Read streams asynchronously (avoids ReadLine() deadlocks and avoids PS runspace/event-handler crashes)
+  $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+  $stderrTask = $p.StandardError.ReadToEndAsync()
 
   $exited =
     if ($TimeoutSeconds -gt 0) { $p.WaitForExit($TimeoutSeconds * 1000) }
@@ -113,19 +96,32 @@ function RunExe {
     try { $p.WaitForExit() } catch {}
     try { [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask,$stderrTask), 2000) } catch {}
 
-    $stdout = ($stdoutLines -join "`n").TrimEnd()
-    $stderr = ($stderrLines -join "`n").TrimEnd()
+    $stdout = ""
+    $stderr = ""
+    try { if ($stdoutTask.Status -eq 'RanToCompletion') { $stdout = $stdoutTask.Result } } catch {}
+    try { if ($stderrTask.Status -eq 'RanToCompletion') { $stderr = $stderrTask.Result } } catch {}
+
+    $stdout = ($stdout ?? "").TrimEnd()
+    $stderr = ($stderr ?? "").TrimEnd()
     if ($stdout) { Write-Host $stdout }
     if ($stderr) { Write-Host $stderr }
 
     throw "Command timed out after ${TimeoutSeconds}s: $FilePath $argLine"
   }
 
+  # Ensure async reads flush after process exit
+  try { $p.WaitForExit() } catch {}
   try { [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask,$stderrTask), 5000) } catch {}
 
   $exit = $p.ExitCode
-  $stdout = ($stdoutLines -join "`n").TrimEnd()
-  $stderr = ($stderrLines -join "`n").TrimEnd()
+
+  $stdout = ""
+  $stderr = ""
+  try { if ($stdoutTask.Status -eq 'RanToCompletion') { $stdout = $stdoutTask.Result } } catch {}
+  try { if ($stderrTask.Status -eq 'RanToCompletion') { $stderr = $stderrTask.Result } } catch {}
+
+  $stdout = ($stdout ?? "").TrimEnd()
+  $stderr = ($stderr ?? "").TrimEnd()
 
   if ($stdout) { Write-Host $stdout }
   if ($stderr) { Write-Host $stderr }
@@ -265,15 +261,6 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
   Log "Deleted: $stackName ($region)"
 }
 
-function DeleteIfExists([string]$path) {
-  if (Test-Path $path) {
-    Log "Deleting $path"
-    Remove-Item -Force -Recurse $path
-  } else {
-    Log "Not present (ok): $path"
-  }
-}
-
 function GetHostedZoneId([string]$domain) {
   # Find the public hosted zone for the domain (exact match on name with trailing dot)
   $zones = AwsJson "route53 list-hosted-zones"
@@ -310,7 +297,7 @@ function UpdateRegistrarNameservers([string]$domain, [string[]]$nsServers) {
 
   try {
     Log ("Calling RunExe 8")
-    RunExe -FileList $AwsExe -timeoutSeconds 3600 -ArgumentList @(
+    RunExe -FilePath $AwsExe -timeoutSeconds 3600 -ArgumentList @(
       "route53domains","update-domain-nameservers",
       "--region",$DomainsRegion,
       "--domain-name",$domain,
@@ -492,7 +479,7 @@ function DeleteNonRequiredRecordSets([string]$zoneId, [string]$domain) {
 
   try {
     Log ("Calling RunExe 9")
-    RunExe -FileList $AwsExe -timeoutSeconds 3600 -ArgumentList @(
+    RunExe -FilePath $AwsExe -timeoutSeconds 3600 -ArgumentList @(
       "route53","change-resource-record-sets",
       "--hosted-zone-id",$zoneId,
       "--change-batch","file://$tmp",
@@ -517,89 +504,31 @@ function GetRegistrarNameservers([string]$domain) {
   return @($d.Nameservers | ForEach-Object { $_.Name.ToString().ToLowerInvariant().Trim().TrimEnd(".") } | Sort-Object)
 }
 
-
 # ---------------- MAIN ----------------
 
-Log "=== CLEAN REBUILD START ==="
 Log "Profile: $Profile"
 Log "Domain:  $DomainName"
 
 $CdkExe    = "$env:APPDATA\npm\cdk.cmd"
 $AwsExe    = "aws.exe"
-$DotnetExe = "dotnet.exe"
 
 $DnsStackRegion = "us-west-2"
 $CertStackRegion = "us-east-1"
 $SiteStackRegion = "us-west-2"
-$SolutionPath   = ".\src\Infra.sln"
-
 $DoNotTimeout = -1
 
 # Preflight Require Commands
 RequireCommand $CdkExe
 RequireCommand $AwsExe
-RequireCommand $DotnetExe
 
 # Preflight identity
 Log "Getting caller identity..."
 Log ("Calling RunExe 10")
 RunExe -FilePath $AwsExe -TimeoutSeconds 3600 -ArgumentList @("sts", "get-caller-identity", "--profile", $Profile)
 
-# Optional rebuild
-Log "Building solution..."
-Log ("Calling RunExe 11")
-$typeval = $DoNotTimeout.GetType().FullName
-Log ("type of DonotTimeout is $typeval")
-Log ("value of DonotTimout is $DoNotTimeout")
-RunExe -FilePath $DotnetExe -TimeoutSeconds -1 -ArgumentList @("build", $SolutionPath)
-
 # Phase 1: destroy stacks (reverse order)
 Log "Destroying stacks (reverse dependency order)..."
-DestroyStackStrict $SiteStack $SiteStackRegion
-DestroyStackStrict $CertStack $CertStackRegion
+#DestroyStackStrict $SiteStack $SiteStackRegion
+#DestroyStackStrict $CertStack $CertStackRegion
 DestroyDnsStackWithZoneCleanup  $DnsStack  $DnsStackRegion $DomainName
 
-# Phase 2: clear local CDK state
-Log "Clearing local CDK state..."
-DeleteIfExists (Join-Path $PSScriptRoot "cdk.context.json")
-DeleteIfExists (Join-Path $PSScriptRoot "cdk.out")
-
-# Phase 3: deploy DNS
-Log "Deploying DNS stack..."
-Log ("Calling RunExe 12")
-RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $DnsStack, "--profile", $Profile, "--require-approval", "never")
-
-# Phase 4: read hosted zone + NS
-$zoneId = GetHostedZoneId $DomainName
-Log "Hosted zone id: $zoneId"
-
-$ns = GetNsFromHostedZone $zoneId $DomainName
-Log ("Hosted zone NS: " + ($ns -join ", "))
-
-# Phase 5: update registrar delegation (Route53Domains)
-Log "Updating registrar nameservers to match hosted zone..."
-UpdateRegistrarNameservers $DomainName $ns
-
-# Phase 6: wait for public delegation
-WaitForDelegation $DomainName $ns $DnsWaitSeconds
-
-# Phase 7: deploy cert + wait issued
-Log "Deploying Cert stack..."
-Log ("Calling RunExe 13")
-RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $CertStack, "--profile", $Profile, "--require-approval", "never")
-
-WaitForCertIssued $DomainName $AcmWaitSeconds
-
-# Phase 8: deploy site
-Log "Deploying Site stack..."
-Log ("Calling RunExe 14")
-RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $SiteStack, "--profile", $Profile, "--require-approval", "never")
-
-# Phase 9: basic verify
-Log "Basic verify: public NS"
-foreach ($r in $Resolvers) {
-  $got = NslookupNs $DomainName $r
-  Log ("Resolver {0} NS: {1}" -f $r, (($got | Sort-Object) -join ", "))
-}
-
-Log "=== CLEAN REBUILD COMPLETE ==="
