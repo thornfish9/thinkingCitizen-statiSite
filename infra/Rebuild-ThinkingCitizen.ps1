@@ -575,7 +575,7 @@ function GetLatestCertArnFromCertStackOutput {
 
   Log "Retrieving latest certArn from CloudFormation outputs: stack=$CertStackName region=$certRegion key=$outputKey"
 
-  $stackJson = AwsJson -TimeoutSeconds 60 -ArgumentList @(
+  $stackJson = AwsJson -TimeoutSeconds 60 -awsArgs @(
     "cloudformation", "describe-stacks",
     "--region", $certRegion,
     "--stack-name", $CertStackName
@@ -599,7 +599,7 @@ function GetLatestCertArnFromCertStackOutput {
   }
 
   # Optional sanity checks against ACM (same region)
-  $certDesc = AwsJson -TimeoutSeconds 60 -ArgumentList @(
+  $certDesc = AwsJson -TimeoutSeconds 60 -awsArgs @(
     "acm", "describe-certificate",
     "--region", $certRegion,
     "--certificate-arn", $certArn
@@ -823,7 +823,7 @@ RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $CertSta
 #WaitForCertIssued $DomainName $AcmWaitSeconds
 
 Log "Awaiting Cert stack..."
-$certArn = GetLatestCertArnFromCertStackOutput -CertStackName $CertStack -DomainName $Domain
+$certArn = GetLatestCertArnFromCertStackOutput -CertStackName $CertStack -DomainName $DomainName
 Log "Cert stack completed. certArn = $certArn"
 
 # Phase 8: deploy site
