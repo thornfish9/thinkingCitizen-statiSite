@@ -43,20 +43,40 @@ namespace Infra
                 Env = envWest
             });
 
-            // Cert stack (ACM in us-east-1) writes ARN to SSM
             _ = new CertStack(app, "ThinkingCitizen-Cert", new CertStackProps
             {
                 DomainName = domainName,
                 Env = envEast
             });
 
-            // Site stack reads cert ARN from SSM (no cross-region references)
-            _ = new SiteStack(app, "ThinkingCitizen-Site", new SiteStackProps
+            // We only instantiate SiteStack if certArn is available
+            var certArn = app.Node.TryGetContext("certArn")?.ToString();
+
+            // NOTE: SiteStack is only instantiated when certArn is provided via CDK context.
+            // This is intentional.
+            //
+            // Without certArn, we skip creating SiteStack so DNS and Cert stacks can be
+            // deployed independently (e.g., first-time bootstrap or partial rebuilds).
+            //
+            // Consequence:
+            // If someone runs `cdk deploy ThinkingCitizen-Site` without passing
+            //   -c certArn=...
+            // the stack will not exist in the synthesized app and CDK will report
+            // "stack not found" (because it was never instantiated).
+            //
+            // The canonical way to deploy Site is via the rebuild script, which:
+            // 1. Deploys DNS + Cert
+            // 2. Extracts the us-east-1 ACM cert ARN
+            // 3. Re-invokes CDK with -c certArn=...
+            if (!string.IsNullOrWhiteSpace(certArn))
             {
-                DomainName = domainName,
-                CertificateArnSsmParamName = $"/thinkingcitizen/{domainName}/cloudfront-cert-arn",
-                Env = envWest
-            });
+                _ = new SiteStack(app, "ThinkingCitizen-Site", new SiteStackProps
+                {
+                    DomainName = domainName,
+                    CertArn = certArn,
+                    Env = envWest
+                });
+            }
 
             app.Synth();
         }

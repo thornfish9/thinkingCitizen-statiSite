@@ -5,15 +5,15 @@ using Amazon.CDK.AWS.CloudFront.Origins;
 using Amazon.CDK.AWS.Route53;
 using Amazon.CDK.AWS.Route53.Targets;
 using Amazon.CDK.AWS.S3;
-using Amazon.CDK.AWS.SSM;
 using Constructs;
+using System;
 
 namespace Infra
 {
     public class SiteStackProps : StackProps
     {
         public string DomainName { get; init; } = "";
-        public string CertificateArnSsmParamName { get; init; } = "";
+        public string CertArn { get; init; } = "";
     }
 
     public class SiteStack : Stack
@@ -26,8 +26,9 @@ namespace Infra
                 DomainName = props.DomainName
             });
 
-            // Read cert ARN from SSM parameter (written by CertStack in us-east-1)
-            var certArn = StringParameter.ValueForStringParameter(this, props.CertificateArnSsmParamName);
+            //cert ARN supplied via props (script/context bridge)
+            var certArn = props.CertArn;
+            ValidateCertArn(certArn);
             var cert = Certificate.FromCertificateArn(this, "SiteCert", certArn);
 
             // --- Content bucket (private, served via CloudFront OAC) ---
@@ -135,6 +136,36 @@ namespace Infra
             {
                 Value = wwwDistribution.DistributionDomainName
             });
+        }
+
+        private void ValidateCertArn(string certArn)
+        {
+            var isOk = false;
+            var msg = string.Empty;
+
+            if (string.IsNullOrEmpty(certArn))
+            {
+                msg = "Arn must not be empty or null";
+            }
+            else if (!certArn.StartsWith("arn:"))
+            {
+                msg = @"Arn must begin with ""arn:"". Have [$certArn]";
+            }
+            else if (!certArn.Contains(":acm:us-east-1:")){
+                msg = @"Cert ARN must contain "":acm:us-east-1:"", signifying AWS Certificate Manager Service in Region us-east-1. Have [$certArn]";
+            }
+            else if (!certArn.Contains(":certificate/"))
+            {
+                msg = @"Cert ARN must contain "":certificate/"", signifying ARN is for a certificate. Have [$certArn]";
+            }
+            else
+            {
+                isOk = true;
+            }
+
+            if (!isOk) {
+                throw new ArgumentException(msg);
+            };
         }
     }
 }

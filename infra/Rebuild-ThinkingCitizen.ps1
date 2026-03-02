@@ -63,7 +63,7 @@ function RunExe {
     Log "RunExe: $FilePath $argLine"
   }
 
-  $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+  $pinfo = [System.Diagnostics.ProcessStartInfo]::new()
   $pinfo.FileName = $FilePath
   $pinfo.Arguments = $argLine
   $pinfo.RedirectStandardOutput = $true
@@ -72,7 +72,7 @@ function RunExe {
   $pinfo.CreateNoWindow = $true
   $pinfo.WorkingDirectory = (Get-Location).Path
 
-  $p = New-Object System.Diagnostics.Process
+  $p = [System.Diagnostics.Process]::new()  
   $p.StartInfo = $pinfo
 
   try { [void]$p.Start() }
@@ -127,48 +127,108 @@ function RunExe {
   if ($stderr) { Write-Host $stderr }
 
   if ($exit -ne 0) {
-    throw "Command failed ($exit): $FilePath $argLine"
+    #throw "Command failed ($exit): $FilePath $argLine"
+    #------------- Begin Expanded throw ---------------
+    # Include captured output so callers can pattern-match on it
+    $msg = "Command failed ($exit): $FilePath $argLine"
+
+    if ($stderr) {
+      $msg += "`n--- STDERR ---`n$stderr"
+    }
+
+    if ($stdout) {
+      $msg += "`n--- STDOUT ---`n$stdout"
+    }
+
+    throw $msg
   }
+    #------------- End Expanded throw   ---------------
 
   return $stdout
 }
 
+function SanitizeToJson {
+  param(
+    [Parameter(Mandatory=$true)] [string]$Text
+  )
+
+  if ($null -eq $Text) { return $null }
+
+  $s = $Text.TrimStart()
+  if ($s.Length -eq 0) { return $s }
+
+  # Find first JSON object/array start
+  $idxObj = $s.IndexOf('{')
+  $idxArr = $s.IndexOf('[')
+
+  $idx =
+    if ($idxObj -ge 0 -and $idxArr -ge 0) { [Math]::Min($idxObj, $idxArr) }
+    elseif ($idxObj -ge 0) { $idxObj }
+    elseif ($idxArr -ge 0) { $idxArr }
+    else { -1 }
+
+  if ($idx -lt 0) { return $s }
+
+  if ($idx -gt 0) { $s = $s.Substring($idx) }
+
+  return $s.Trim()
+}
+
+function EnsureScalarString {
+  param(
+    [Parameter(Mandatory=$true)]
+    $Value,
+
+    [Parameter(Mandatory=$true)]
+    [string]$Context
+  )
+
+  if ($null -eq $Value) { return $null }
+
+  if ($Value -is [System.Array]) {
+    Log ("WARNING: {0}: expected scalar string but got array ({1} items). Using last element. Likely pipeline output contamination (e.g., Log writing to success pipeline)." -f $Context, $Value.Count)
+    if ($Value.Count -eq 0) { return $null }
+    return [string]$Value[-1]
+  }
+
+  return [string]$Value
+}
+
 function AwsJson(
-  [Parameter(ValueFromRemainingArguments=$true)]
-  [string[]]$awsArgs,
-  [int]$timeoutSeconds = 3600
-) {
-
-  # Back-compat token handling
-  $parts =
-    if (-not $awsArgs -or $awsArgs.Count -eq 0) {
-      @()
-    }
-    elseif ($awsArgs.Count -eq 1) {
-      @($awsArgs[0] -split '\s+' | Where-Object { $_ -and $_.Trim().Length -gt 0 })
-    }
-    else {
-      @($awsArgs | Where-Object { $_ -and $_.Trim().Length -gt 0 })
-    }
-
-  if ($parts.Count -eq 0) {
+  [Parameter(Mandatory=$true)] [int]$timeoutSeconds,
+  [Parameter(Mandatory=$true)] [string[]]$awsArgs) {
+  
+  # Contract: awsArgs must be explicit tokens (string[]), no alternate calling conventions.
+  if (-not $awsArgs -or $awsArgs.Count -eq 0) {
     throw "AwsJson called with no aws arguments (empty command)."
   }
 
+  # If someone passes a single 'aws ...' string, reject it explicitly.
+  if ($awsArgs.Count -eq 1 -and ($awsArgs[0] -match '\s')) {
+    throw "AwsJson contract violation: awsArgs must be explicit tokens (string[]). Do not pass a single space-delimited command string."
+  }
+
+  $parts = @($awsArgs | Where-Object { $_ -and $_.Trim().Length -gt 0 })
+
+  if ($parts.Count -eq 0) {
+    throw "AwsJson called with no aws arguments after trimming."
+  }
   Log ("aws {0} --profile {1} --output json" -f ($parts -join " "), $Profile)
 
-  # Build final argument list safely
+  # Build final argument list safely (tokenized)
   $finalArgs = @()
   $finalArgs += $parts
   $finalArgs += @("--profile",$Profile,"--output","json")
 
   Log ("Calling RunExe 1")
-  $stdout = RunExe -FilePath $AwsExe -TimeoutSeconds $timeoutSeconds -ArgumentList $finalArgs
-
+  $stdoutRaw = RunExe -FilePath $AwsExe -TimeoutSeconds $timeoutSeconds -ArgumentList $finalArgs
+  $stdout = EnsureScalarString -Value $stdoutRaw -Context "AwsJson/RunExe stdout"
   if (-not $stdout) { return $null }
 
+  $jsonText = SanitizeToJson $stdout
+
   try {
-    return ($stdout | ConvertFrom-Json)
+    return ($jsonText | ConvertFrom-Json)
   }
   catch {
     throw @"
@@ -176,6 +236,9 @@ AwsJson failed to parse JSON.
 Command: aws $($parts -join ' ')
 Raw output:
 $stdout
+
+Sanitized output:
+$jsonText
 "@
   }
 }
@@ -216,7 +279,31 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
   } catch {
 
     # Match against the full error record text (RunExe now includes stdout/stderr in the thrown exception).
-    $errText = ($_ | Out-String)
+    #$errText = ($_ | Out-String)
+
+    #------- Start diagnostic code to diagnose match failure
+    $e = $_
+
+    # Show exactly what we are about to regex-test
+    $errText = ($e | Out-String -Width 4000)
+
+    Log "---- BEGIN catch diagnostic ----"
+    Log ("ErrorRecord.Type: {0}" -f ($e.GetType().FullName))
+    Log ("Exception.Type:  {0}" -f ($e.Exception.GetType().FullName))
+    Log ("Exception.Message: {0}" -f ($e.Exception.Message))
+
+    # Full exception text (includes stack + inner exception text when present)
+    Log "Exception.ToString():"
+    Log ($e.Exception.ToString())
+
+    # Full ErrorRecord text (what your match currently uses)
+    Log "ErrorRecord (Out-String):"
+    Log $errText
+
+    $match = ($errText -match "HostedZoneNotEmptyException")
+    Log ("Regex match HostedZoneNotEmptyException? {0}" -f $match)
+    Log "---- END catch diagnostic ----"
+    # ------ End diagnotic code to diagnose match faiure
 
     if ($errText -match "HostedZoneNotEmptyException") {
       Log "DNS destroy failed due to HostedZoneNotEmptyException. Cleaning hosted zone records..."
@@ -263,7 +350,30 @@ function DestroyDnsStackWithZoneCleanup([string]$stackName, [string]$region, [st
 
 function GetHostedZoneId([string]$domain) {
   # Find the public hosted zone for the domain (exact match on name with trailing dot)
-  $zones = AwsJson "route53 list-hosted-zones"
+  #$zones = AwsJson "route53 list-hosted-zones"
+  try {
+    $zones = AwsJson -TimeoutSeconds 3600 -awsArgs @(
+      "route53",
+      "list-hosted-zones"
+    )
+  }
+  catch {
+    Write-Host "ERROR calling AwsJson" -ForegroundColor Red
+
+    $err = $_
+
+    Write-Host "---- Message ----"
+    Write-Host $err.Exception.Message
+
+    Write-Host "---- ScriptStackTrace ----"
+    Write-Host $err.ScriptStackTrace
+
+    Write-Host "---- InvocationInfo ----"
+    $err.InvocationInfo | Format-List * | Out-String | Write-Host
+
+    throw  # rethrow so your script still fails
+  }
+
   $wanted = ($domain.TrimEnd(".") + ".").ToLowerInvariant()
 
   $zone = $zones.HostedZones | Where-Object { $_.Name.ToLowerInvariant() -eq $wanted } | Select-Object -First 1
@@ -274,7 +384,12 @@ function GetHostedZoneId([string]$domain) {
 }
 
 function GetNsFromHostedZone([string]$zoneId, [string]$domain) {
-  $rrs = AwsJson "route53 list-resource-record-sets --hosted-zone-id $zoneId"
+  #$rrs = AwsJson "route53 list-resource-record-sets --hosted-zone-id $zoneId"
+  $rrs = AwsJson -TimeoutSeconds 3600 -awsArgs @(
+    "route53",
+    "list-resource-record-sets",
+    "--hosted-zone-id", $zoneId
+  )
   $wanted = ($domain.TrimEnd(".") + ".").ToLowerInvariant()
 
   $ns = $rrs.ResourceRecordSets |
@@ -390,7 +505,13 @@ function WaitForDelegation([string]$domain, [string[]]$expectedNs, [int]$timeout
 }
 
 function GetCertArnForDomain([string]$domain) {
-  $list = AwsJson "acm list-certificates --region $DomainsRegion"
+  #$list = AwsJson "acm list-certificates --region $DomainsRegion"
+  $list = AwsJson -TimeoutSeconds 3600 -awsArgs @(
+    "acm", 
+    "list-certificates",
+    "--region", $DomainsRegion
+  )
+
   # ACM list is regional; cert is in us-east-1 (DomainsRegion). Filter by exact domain or wildcard as needed.
   $wanted = $domain.ToLowerInvariant()
   $cand = $list.CertificateSummaryList |
@@ -402,10 +523,17 @@ function GetCertArnForDomain([string]$domain) {
 }
 
 function GetCertStatus([string]$arn) {
-  $desc = AwsJson "acm describe-certificate --region $DomainsRegion --certificate-arn $arn"
+  #$desc = AwsJson "acm describe-certificate --region $DomainsRegion --certificate-arn $arn"
+  $desc = AwsJson -TimeoutSeconds 3600 -awsArgs @(
+    "acm", "describe-certificate",
+    "--certificate-arn", $arn,
+    "--region", $DomainsRegion
+  )
+
   return $desc.Certificate.Status
 }
 
+# We expect to drop this function in favor of GetLatestCertArnFromCertStackOutput below
 function WaitForCertIssued([string]$domain, [int]$timeoutSeconds) {
   $deadline = (Get-Date).AddSeconds($timeoutSeconds)
   Log "Waiting for ACM cert to be ISSUED for $domain (timeout ${timeoutSeconds}s)"
@@ -432,6 +560,72 @@ function WaitForCertIssued([string]$domain, [int]$timeoutSeconds) {
   throw "Timed out waiting for ACM cert to be ISSUED."
 }
 
+function GetLatestCertArnFromCertStackOutput {
+  param(
+    [Parameter(Mandatory=$true)]
+    [string]$CertStackName,
+
+    # Optional: if you pass this, we’ll sanity-check the cert covers the domain.
+    [Parameter(Mandatory=$false)]
+    [string]$DomainName = $null
+  )
+
+  $certRegion = "us-east-1"
+  $outputKey  = "CertificateArn"
+
+  Log "Retrieving latest certArn from CloudFormation outputs: stack=$CertStackName region=$certRegion key=$outputKey"
+
+  $stackJson = AwsJson -TimeoutSeconds 60 -ArgumentList @(
+    "cloudformation", "describe-stacks",
+    "--region", $certRegion,
+    "--stack-name", $CertStackName
+  )
+
+  if (-not $stackJson -or -not $stackJson.Stacks -or $stackJson.Stacks.Count -lt 1) {
+    throw "describe-stacks returned no stacks for $CertStackName in $certRegion"
+  }
+
+  $outputs = $stackJson.Stacks[0].Outputs
+  if (-not $outputs) {
+    throw "Stack $CertStackName in $certRegion has no Outputs (expected $outputKey)."
+  }
+
+  $certArn = $outputs |
+    Where-Object { $_.OutputKey -eq $outputKey } |
+    Select-Object -ExpandProperty OutputValue
+
+  if (-not $certArn) {
+    throw "Could not find OutputKey '$outputKey' in stack $CertStackName outputs (region $certRegion)."
+  }
+
+  # Optional sanity checks against ACM (same region)
+  $certDesc = AwsJson -TimeoutSeconds 60 -ArgumentList @(
+    "acm", "describe-certificate",
+    "--region", $certRegion,
+    "--certificate-arn", $certArn
+  )
+
+  $status = $certDesc.Certificate.Status
+  Log "ACM cert status: $status ($certArn)"
+
+  if ($status -eq "FAILED" -or $status -eq "REVOKED") {
+    throw "Certificate is in terminal failure state: $status ($certArn)"
+  }
+
+  if ($DomainName) {
+    $domainOk =
+      ($certDesc.Certificate.DomainName -eq $DomainName) -or
+      ($certDesc.Certificate.SubjectAlternativeNames -contains $DomainName)
+
+    if (-not $domainOk) {
+      throw "Certificate from stack output does not appear to cover domain '$DomainName' (certArn=$certArn)."
+    }
+  }
+
+  Log "certArn retrieved from stack output: $certArn"
+  return $certArn
+}
+
 function RequireCommand([string]$pathOrName) {
   $cmd = Get-Command $pathOrName -ErrorAction SilentlyContinue
   if (-not $cmd) { throw "Required command not found: $pathOrName" }
@@ -439,7 +633,13 @@ function RequireCommand([string]$pathOrName) {
 }
 
 function ListRecordSets([string]$zoneId) {
-  $rrs = AwsJson "route53 list-resource-record-sets --hosted-zone-id $zoneId"
+  #$rrs = AwsJson "route53 list-resource-record-sets --hosted-zone-id $zoneId"
+  $rrs = AwsJson -TimeoutSeconds 3600 -awsArgs @(
+    "route53",
+    "list-resource-record-sets",
+    "--hosted-zone-id", $zoneId
+  )
+
   return @($rrs.ResourceRecordSets)
 }
 function DeleteNonRequiredRecordSets([string]$zoneId, [string]$domain) {
@@ -491,7 +691,13 @@ function DeleteNonRequiredRecordSets([string]$zoneId, [string]$domain) {
 }
 
 function GetHostedZoneIdFromStack([string]$stackName, [string]$region) {
-  $res = AwsJson cloudformation list-stack-resources --region $region --stack-name $stackName
+  #$res = AwsJson cloudformation list-stack-resources --region $region --stack-name $stackName
+  $res = AwsJson -TimeoutSeconds 3600 -awsArgs @(
+    "cloudformation", "list-stack-resources",
+    "--region", $region,
+    "--stack-name", $stackName
+  )
+
   $hz = $res.StackResourceSummaries | Where-Object { $_.ResourceType -eq "AWS::Route53::HostedZone" } | Select-Object -First 1
   if (-not $hz -or -not $hz.PhysicalResourceId) {
     throw "HostedZone physical id not found in stack resources for $stackName ($region)."
@@ -500,8 +706,50 @@ function GetHostedZoneIdFromStack([string]$stackName, [string]$region) {
 }
 
 function GetRegistrarNameservers([string]$domain) {
-  $d = AwsJson route53domains get-domain-detail --region $DomainsRegion --domain-name $domain
+  #$d = AwsJson route53domains get-domain-detail --region $DomainsRegion --domain-name $domain
+  $d = AwsJson -TimeoutSeconds 3600 -awsArgs @(
+    "route53domains",
+    "get-domain-detail",
+    "--region", $DomainsRegion,
+    "--domain-name", $domain
+  )
+
   return @($d.Nameservers | ForEach-Object { $_.Name.ToString().ToLowerInvariant().Trim().TrimEnd(".") } | Sort-Object)
+}
+
+function DeleteIfExists([string]$path) {
+  if (Test-Path $path) {
+    Log "Deleting $path"
+    Remove-Item -Force -Recurse $path
+  } else {
+    Log "Not present (ok): $path"
+  }
+}
+
+function Get-CertArnFromCertStack {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$CertStackName
+    )
+
+    Log "Retrieving certArn from CertStack outputs (us-east-1)..."
+
+    $certStackJson = AwsJson -TimeoutSeconds 60 -awsArgs @(
+        "cloudformation", "describe-stacks",
+        "--region", "us-east-1",
+        "--stack-name", $CertStackName
+    )
+
+    $certArn = $certStackJson.Stacks[0].Outputs |
+        Where-Object { $_.OutputKey -eq "CertificateArn" } |
+        Select-Object -ExpandProperty OutputValue
+
+    if (-not $certArn) {
+        throw "Could not find CertificateArn output in stack $CertStackName (us-east-1)"
+    }
+
+    Log "certArn retrieved: $certArn"
+    return $certArn
 }
 
 # ---------------- MAIN ----------------
@@ -511,24 +759,85 @@ Log "Domain:  $DomainName"
 
 $CdkExe    = "$env:APPDATA\npm\cdk.cmd"
 $AwsExe    = "aws.exe"
+$DotnetExe = "dotnet.exe"
 
 $DnsStackRegion = "us-west-2"
 $CertStackRegion = "us-east-1"
 $SiteStackRegion = "us-west-2"
+$SolutionPath   = ".\src\Infra.sln"
 $DoNotTimeout = -1
 
 # Preflight Require Commands
 RequireCommand $CdkExe
 RequireCommand $AwsExe
-
+RequireCommand $DotnetExe
 # Preflight identity
 Log "Getting caller identity..."
 Log ("Calling RunExe 10")
 RunExe -FilePath $AwsExe -TimeoutSeconds 3600 -ArgumentList @("sts", "get-caller-identity", "--profile", $Profile)
 
+# Rebuild CDK app
+Log "Building solution..."
+RunExe $DotnetExe @( "build", $SolutionPath) -timeoutSeconds $DoNotTimeout
+
+#Phas 0: get certArn
+#temporarily commented out because staccks manually deleted in aws console
+#$certArn = Get-CertArnFromCertStack -CertStackName $CertStack
+
 # Phase 1: destroy stacks (reverse order)
 Log "Destroying stacks (reverse dependency order)..."
-#DestroyStackStrict $SiteStack $SiteStackRegion
-#DestroyStackStrict $CertStack $CertStackRegion
+DestroyStackStrict $SiteStack $SiteStackRegion
+DestroyStackStrict $CertStack $CertStackRegion
 DestroyDnsStackWithZoneCleanup  $DnsStack  $DnsStackRegion $DomainName
 
+# Phase 2: clear local CDK state
+Log "Clearing local CDK state..."
+DeleteIfExists (Join-Path $PSScriptRoot "cdk.context.json")
+DeleteIfExists (Join-Path $PSScriptRoot "cdk.out")
+
+# Phase 3: deploy DNS
+Log "Deploying DNS stack..."
+Log ("Calling RunExe 12")
+RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $DnsStack, "--profile", $Profile, "--require-approval", "never")
+
+# Phase 4: read hosted zone + NS
+$zoneId = GetHostedZoneId $DomainName
+Log "Hosted zone id: $zoneId"
+
+$ns = GetNsFromHostedZone $zoneId $DomainName
+Log ("Hosted zone NS: " + ($ns -join ", "))
+
+# Phase 5: update registrar delegation (Route53Domains)
+Log "Updating registrar nameservers to match hosted zone..."
+UpdateRegistrarNameservers $DomainName $ns
+
+# Phase 6: wait for public delegation
+WaitForDelegation $DomainName $ns $DnsWaitSeconds
+
+# Phase 7: deploy cert + wait issued
+Log "Deploying Cert stack..."
+Log ("Calling RunExe 13")
+RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $CertStack, "--profile", $Profile, "--require-approval", "never")
+
+# we expect to drop this. Trying out the replacement immediately  below
+#WaitForCertIssued $DomainName $AcmWaitSeconds
+
+Log "Awaiting Cert stack..."
+$certArn = GetLatestCertArnFromCertStackOutput -CertStackName $CertStack -DomainName $Domain
+Log "Cert stack completed. certArn = $certArn"
+
+# Phase 8: deploy site
+Log "Deploying Site stack..."
+Log ("Calling RunExe 14")
+# this is the old line before passing the certArn in a -c in the context
+#RunExe -FilePath $CdkExe -timeoutSeconds 3600 -ArgumentList @("deploy", $SiteStack, "--profile", $Profile, "--require-approval", "never")
+RunExe -FilePath $CdkExe -TimeoutSeconds 3600 -ArgumentList @("deploy", $SiteStack, "--profile", $Profile, "--require-approval", "never", "-c", "certArn=$certArn")
+
+# Phase 9: basic verify
+Log "Basic verify: public NS"
+foreach ($r in $Resolvers) {
+  $got = NslookupNs $DomainName $r
+  Log ("Resolver {0} NS: {1}" -f $r, (($got | Sort-Object) -join ", "))
+}
+
+Log "=== CLEAN REBUILD COMPLETE ==="
