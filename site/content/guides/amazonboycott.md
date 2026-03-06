@@ -1,7 +1,7 @@
 ---
 title: "amazonBoycott"
-date: 2026-03-01T21:06:57-08:00
-draft: false
+date: 2026-03-05T23:32:40-08:00
+draft: true
 ---
 **How to Tell Amazon You’re Boycotting**
 
@@ -9,7 +9,7 @@ Last updated: Feb 19, 2026
 
 ------------------------------------------------------------------------
 
-**Summaryx**
+**Summaryxy**
 
 This guide explains practical ways to tell Amazon you are boycotting their services or products. It focuses on clear, direct contact channels and explains what each method accomplishes. The goal is to help an individual communicate feedback effectively using official and public channels.
 

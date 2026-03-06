@@ -7,6 +7,13 @@ resources/
 # Hugo build lock
 .hugo_build.lock
 
+#Other hugo cruft
+content/guides/_pending-paths.txt
+
 # OS noise
 .DS_Store
 Thumbs.db
+
+#Word lock files
+writing/guides/~$*.docx
+
