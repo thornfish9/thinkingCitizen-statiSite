@@ -9,3 +9,11 @@ title = "The Thinking Citizen"
 [params.homeInfoParams]
   Title = "The Thinking Citizen"
   Content = "Tools, guides, and ideas for people who want to understand systems and think clearly."
+
+[menu]
+
+  [[menu.main]]
+    identifier = "guides"
+    name = "Guides"
+    url = "/guides/"
+    weight = 10
