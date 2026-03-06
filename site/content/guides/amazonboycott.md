@@ -1,7 +1,7 @@
 ---
 title: "amazonBoycott"
 date: 2026-03-01T21:06:57-08:00
-draft: true
+draft: false
 ---
 **How to Tell Amazon You’re Boycotting**
 
